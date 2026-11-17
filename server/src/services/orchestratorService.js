@@ -67,7 +67,7 @@ export async function generateRecommendations({
   // ── Step 3: Supplementary Enrichment (Google Places) ──────────────────────
   const enrichedPool = await enrichAttractionsWithGooglePlaces(candidatePool);
 
-  // ── Step 4: Pricing Resolution (TicketLens -> Official -> Category Estimate) ──
+  // ── Step 4: Pricing Resolution (Official Counter Rates -> Category Estimate) ──
   const pricedPool = await Promise.all(
     enrichedPool.map(async (attraction) => {
       const price = await resolveAttractionPrice(attraction, city);
@@ -155,7 +155,7 @@ export async function generateRecommendations({
   if (estimatedPricesCount > 0) {
     fallbacksUsed.push({
       feature: 'Ticket Pricing',
-      api: 'TicketLens / Official Counters',
+      api: 'Official Tourism Counters',
       status: 'partial_fallback',
       fallbackMethod: 'Category Estimation Matrix',
       badge: '📊 Category Estimates',
@@ -192,14 +192,6 @@ export async function generateRecommendations({
       verifiedCount: verifiedPricesCount,
       estimatedCount: estimatedPricesCount,
       activeDataSource: `${verifiedPricesCount} Official Counter Verified, ${estimatedPricesCount} Category Median Estimates`,
-    },
-    ticketLens: {
-      provider: 'TicketLens',
-      configured: false,
-      isLive: false,
-      mode: 'safe_unconfigured',
-      status: 'unconfigured',
-      activeDataSource: 'Official Counter Rate Cards (No fake tickets fabricated)',
     },
   };
 

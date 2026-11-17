@@ -10,7 +10,6 @@ export const ENV = {
   PORT: parseInt(process.env.PORT || '5005', 10),
   OTM_API_KEY: process.env.OTM_API_KEY || '',
   GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY || '',
-  TICKETLENS_API_KEY: process.env.TICKETLENS_API_KEY || '',
   CORS_ORIGIN: process.env.CORS_ORIGIN || '*',
 };
 
@@ -33,11 +32,6 @@ export function getProviderStatus() {
       provider: 'Google Routes API',
       configured: Boolean(ENV.GOOGLE_MAPS_API_KEY),
       mode: ENV.GOOGLE_MAPS_API_KEY ? 'live_api' : 'haversine_fallback',
-    },
-    ticketLens: {
-      provider: 'TicketLens',
-      configured: Boolean(ENV.TICKETLENS_API_KEY),
-      mode: ENV.TICKETLENS_API_KEY ? 'live_api' : 'unconfigured_unverified',
     },
   };
 }

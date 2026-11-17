@@ -1,6 +1,5 @@
 import { getCityCenter, discoverPlaces } from '../src/services/placeDiscoveryService.js';
 import { fetchSupplementaryPlaceData } from '../src/services/googlePlacesService.js';
-import { searchActivityTickets } from '../src/services/ticketLensService.js';
 import { resolveAttractionPrice } from '../src/services/pricingService.js';
 import { calculateAttractionScore } from '../src/services/scoringService.js';
 import {
@@ -43,13 +42,7 @@ async function runTests() {
   assert(typeof googleResult.isConfigured === 'boolean', 'reports configuration status cleanly');
   assert(!googleResult.isConfigured ? googleResult.status === 'unconfigured' : true, 'reports unconfigured when key is absent');
 
-  console.log('\n--- 3. Testing TicketLens Pricing Service ---');
-  const ticketLensResult = await searchActivityTickets('City Palace', 'Udaipur');
-  assert(ticketLensResult.provider === 'TicketLens', 'identifies provider as TicketLens');
-  assert(Array.isArray(ticketLensResult.tickets), 'tickets is an array (never fabricates fake tickets)');
-  assert(!ticketLensResult.isLive, 'accurately flags unconfigured status without fabrication');
-
-  console.log('\n--- 4. Testing Pricing Service (Priority Hierarchy) ---');
+  console.log('\n--- 3. Testing Pricing Service (Official Counter & Category Hierarchy) ---');
   const verifiedPrice = await resolveAttractionPrice({ id: 'otm_mon_01', name: 'City Palace Udaipur', category: 'Monuments', rating: 3 });
   assert(verifiedPrice.priceType === 'verified', 'City Palace resolved as verified official price');
   assert(verifiedPrice.amount === 400, 'City Palace official fee is verified at ₹400 (counter museum entry)');

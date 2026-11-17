@@ -1,8 +1,6 @@
-import { searchActivityTickets } from './ticketLensService.js';
-
 /**
  * Verified official attraction entry rates in Udaipur.
- * Priority 2: Verified official attraction price with source and verification date.
+ * Priority 1: Verified official attraction price with source and verification date.
  * Sourced from official Rajasthan Tourism, ASI, and temple trust published rates (2024).
  */
 export const VERIFIED_OFFICIAL_PRICES = {
@@ -260,10 +258,9 @@ export const CATEGORY_ESTIMATION_MATRIX = {
 };
 
 /**
- * Resolve price for an attraction adhering strictly to the priority chain:
- * 1. Verified price from an authorized provider (e.g. TicketLens).
- * 2. Verified official attraction price (authentic official counter records with source & date).
- * 3. Category-based estimated price (clearly marked as estimated!).
+ * Resolve price for an attraction adhering strictly to the pricing hierarchy:
+ * 1. Verified official attraction counter price (authentic official records with source & date).
+ * 2. Category-based estimated price (clearly marked as estimated!).
  *
  * @param {object} attraction
  * @param {string} [city='Udaipur']
@@ -275,28 +272,7 @@ export async function resolveAttractionPrice(attraction, city = 'Udaipur') {
   const category = attraction.category || 'Culture';
   const rating = attraction.rating || 1;
 
-  // ── PRIORITY 1: Authorized Provider (TicketLens) ──────────────────────────
-  try {
-    const ticketLensResult = await searchActivityTickets(name, city);
-    if (ticketLensResult.isLive && ticketLensResult.tickets.length > 0) {
-      const bestTicket = ticketLensResult.tickets[0];
-      return {
-        amount: bestTicket.amount,
-        minAmount: bestTicket.amount,
-        maxAmount: bestTicket.amount,
-        currency: 'INR',
-        priceType: 'verified',
-        source: `TicketLens Partner: ${bestTicket.providerName}`,
-        confidence: 0.95,
-        lastVerified: new Date().toISOString(),
-        note: 'Verified from authorized activity provider via TicketLens',
-      };
-    }
-  } catch (err) {
-    // TicketLens failed, seamlessly cascade to Priority 2
-  }
-
-  // ── PRIORITY 2: Verified Official Attraction Counter Price ─────────────────
+  // ── PRIORITY 1: Verified Official Attraction Counter Price ─────────────────
   // Match by attraction ID or canonical keyword
   for (const [keyword, verifiedRecord] of Object.entries(VERIFIED_OFFICIAL_PRICES)) {
     if (lowerName.includes(keyword)) {
@@ -304,7 +280,7 @@ export async function resolveAttractionPrice(attraction, city = 'Udaipur') {
     }
   }
 
-  // ── PRIORITY 3: Category-Based Estimated Price ─────────────────────────────
+  // ── PRIORITY 2: Category-Based Estimated Price ─────────────────────────────
   // NEVER silently mark this as verified!
   const rateKey = `rate${Math.min(Math.max(Math.round(rating), 1), 3)}`;
   const categoryRules = CATEGORY_ESTIMATION_MATRIX[category] || { rate1: 40, rate2: 80, rate3: 150 };
