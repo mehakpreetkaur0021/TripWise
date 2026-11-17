@@ -1,39 +1,24 @@
-/**
- * Knapsack Optimization Service.
- *
- * Implements a Priority-Weighted 0/1 Knapsack algorithm (Dynamic Programming)
- * discretized in capacity units of ₹10.
- *
- * Features:
- * 1. Zero-cost handling: Free attractions (₹0) are included without consuming budget capacity.
- * 2. Budget Mode support:
- *    - 'all_inclusive' (default): reserves a transit allowance so total expenditure (tickets + travel) stays within budget.
- *    - 'tickets_only': user budget applies exclusively to attraction tickets.
- * 3. Soft-budget pass: Computes optimal combination within a configurable over-budget tolerance (e.g. +10%).
- * 4. Isolates true alternatives: Soft-budget results show attractions NOT already in the hard-budget set.
- * 5. Revalidates final expenditure.
- */
+import { sequenceVisitOrderTSP, calculateHaversineDistanceKm } from './googleRoutesService.js';
+import { calculateTransportationCost } from './costCalculationService.js';
 
 const CAPACITY_UNIT_INR = 10;
 
 /**
- * Core 0/1 Knapsack DP Solver.
+ * Core 0/1 Knapsack DP Solver (Discretized capacity units).
  *
  * @param {object[]} items - items with .score and .price.amount
  * @param {number} budgetInINR - max capacity in INR
  * @returns {object[]} selected items
  */
 export function solve01Knapsack(items = [], budgetInINR = 0) {
-  if (!items.length || budgetInINR < 0) return [];
+  if (!items.length || budgetInINR <= 0) return [];
 
-  // Separate completely free items (amount == 0) from paid items
   const freeItems = items.filter((item) => (item.price?.amount ?? 0) <= 0);
   const paidItems = items.filter((item) => (item.price?.amount ?? 0) > 0);
 
-  // Discretize budget into integer units
   const maxUnits = Math.floor(budgetInINR / CAPACITY_UNIT_INR);
+  if (maxUnits <= 0) return freeItems;
 
-  // Filter out paid items that individually exceed total capacity
   const eligiblePaid = paidItems.filter(
     (item) => Math.round(item.price.amount / CAPACITY_UNIT_INR) <= maxUnits
   );
@@ -46,9 +31,8 @@ export function solve01Knapsack(items = [], budgetInINR = 0) {
   const weights = eligiblePaid.map((item) =>
     Math.max(1, Math.round(item.price.amount / CAPACITY_UNIT_INR))
   );
-  const values = eligiblePaid.map((item) => item.score);
+  const values = eligiblePaid.map((item) => item.score || 0.1);
 
-  // 1D DP table & 2D decision tracking matrix
   const dp = new Float32Array(maxUnits + 1).fill(0);
   const keep = Array.from({ length: n }, () => new Uint8Array(maxUnits + 1));
 
@@ -64,7 +48,6 @@ export function solve01Knapsack(items = [], budgetInINR = 0) {
     }
   }
 
-  // Backtrack to recover optimal subset of paid items
   const selectedPaid = [];
   let w = maxUnits;
   for (let i = n - 1; i >= 0; i--) {
@@ -74,97 +57,276 @@ export function solve01Knapsack(items = [], budgetInINR = 0) {
     }
   }
 
-  // Combine free items + optimal paid items
   return [...freeItems, ...selectedPaid];
 }
 
 /**
- * Optimize recommendations with primary set and soft-budget alternatives.
+ * Accurately compute itinerary metrics including TSP sequencing, road distance,
+ * attraction tickets, and transit fares.
+ *
+ * @param {object[]} attractions
+ * @param {object} options
+ * @returns {object} Comprehensive itinerary metrics
+ */
+export function computeItineraryMetrics(
+  attractions = [],
+  {
+    cityCenter = { lat: 24.5854, lon: 73.7125 },
+    transportMode = 'auto_rickshaw',
+    budgetMode = 'all_inclusive',
+  } = {}
+) {
+  if (!attractions.length) {
+    return {
+      sequenced: [],
+      attractionTicketsCost: 0,
+      transportationCost: 0,
+      totalDistanceKm: 0,
+      totalTripCost: 0,
+      totalScore: 0,
+    };
+  }
+
+  const sequenced = sequenceVisitOrderTSP(attractions, cityCenter);
+  const attractionTicketsCost = attractions.reduce(
+    (sum, a) => sum + (a.price?.amount || 0),
+    0
+  );
+  const totalScore = Number(
+    attractions.reduce((sum, a) => sum + (a.score || 0), 0).toFixed(4)
+  );
+
+  // Compute total road distance with 1.3x urban circuity factor
+  let totalDistanceKm = 0;
+  let currentPos = cityCenter;
+  for (const item of sequenced) {
+    const coords = item.coordinates || { lat: item.lat, lon: item.lon ?? item.lng };
+    const legDist = calculateHaversineDistanceKm(currentPos, coords);
+    totalDistanceKm += legDist * 1.3;
+    currentPos = coords;
+  }
+  const returnDist = calculateHaversineDistanceKm(currentPos, cityCenter) * 1.3;
+  totalDistanceKm += returnDist;
+  totalDistanceKm = Number(totalDistanceKm.toFixed(1));
+
+  const transportInfo = calculateTransportationCost(totalDistanceKm, transportMode);
+  const transportationCost = budgetMode === 'tickets_only' ? 0 : transportInfo.costINR;
+  const totalTripCost = attractionTicketsCost + transportationCost;
+
+  return {
+    sequenced,
+    attractionTicketsCost,
+    transportationCost,
+    totalDistanceKm,
+    totalTripCost,
+    totalScore,
+    transportInfo,
+  };
+}
+
+/**
+ * Find the optimal combination of attractions whose TOTAL trip expenditure
+ * (tickets + transportation) does not exceed maxBudget.
  *
  * @param {object[]} scoredAttractions
- * @param {number} budget - Total user budget in INR
- * @param {number} [tolerance=0.10] - e.g. 0.10 for +10%
+ * @param {number} maxBudget
+ * @param {object} options
+ * @returns {{ attractions: object[], metrics: object, isFeasible: boolean }}
+ */
+export function optimizeItineraryForBudget(
+  scoredAttractions = [],
+  maxBudget = 1000,
+  options = {}
+) {
+  const {
+    cityCenter = { lat: 24.5854, lon: 73.7125 },
+    transportMode = 'auto_rickshaw',
+    budgetMode = 'all_inclusive',
+  } = options;
+
+  if (!scoredAttractions.length || maxBudget <= 0) {
+    return {
+      attractions: [],
+      metrics: computeItineraryMetrics([], options),
+      isFeasible: false,
+    };
+  }
+
+  // 1. Initial Knapsack pass reserving minimal baseline transit buffer in all_inclusive mode
+  let initialTransitReserve = 0;
+  if (budgetMode === 'all_inclusive') {
+    initialTransitReserve = Math.min(Math.max(Math.round(maxBudget * 0.15), 60), 250);
+  }
+  const initialTicketBudget = Math.max(0, maxBudget - initialTransitReserve);
+
+  let currentSelection = solve01Knapsack(scoredAttractions, initialTicketBudget);
+  let metrics = computeItineraryMetrics(currentSelection, options);
+
+  // 2. Strict Budget Convergence: Prune if totalTripCost exceeds maxBudget
+  let iterations = 0;
+  while (currentSelection.length > 0 && metrics.totalTripCost > maxBudget && iterations < 35) {
+    iterations++;
+    let worstIndex = -1;
+    let worstEfficiency = Infinity;
+
+    for (let i = 0; i < currentSelection.length; i++) {
+      const item = currentSelection[i];
+      const cost = item.price?.amount || 0;
+      // Evaluate marginal efficiency
+      const efficiency = cost > 0 ? (item.score || 0.1) / cost : (item.score || 0.1) * 5;
+      if (efficiency < worstEfficiency) {
+        worstEfficiency = efficiency;
+        worstIndex = i;
+      }
+    }
+
+    if (worstIndex >= 0) {
+      currentSelection.splice(worstIndex, 1);
+      metrics = computeItineraryMetrics(currentSelection, options);
+    } else {
+      break;
+    }
+  }
+
+  // 3. Greedy Augmentation: Try fitting any omitted candidates that stay within maxBudget
+  const selectedIds = new Set(currentSelection.map((a) => a.id || a.name));
+  const remainingCandidates = scoredAttractions
+    .filter((a) => !selectedIds.has(a.id || a.name))
+    .sort((a, b) => (b.score || 0) - (a.score || 0));
+
+  for (const candidate of remainingCandidates) {
+    const testSet = [...currentSelection, candidate];
+    const testMetrics = computeItineraryMetrics(testSet, options);
+    if (testMetrics.totalTripCost <= maxBudget) {
+      currentSelection = testSet;
+      metrics = testMetrics;
+    }
+  }
+
+  // 4. Strict re-validation against maxBudget
+  const isStrictlyCompliant = metrics.totalTripCost <= maxBudget && currentSelection.length > 0;
+
+  return {
+    attractions: isStrictlyCompliant ? metrics.sequenced : [],
+    metrics: isStrictlyCompliant ? metrics : computeItineraryMetrics([], options),
+    isFeasible: isStrictlyCompliant,
+  };
+}
+
+/**
+ * Full Recommendation Optimizer with strict hard-budget Primary recommendations,
+ * 10% soft-budget Alternatives, and explicit rejection if no combination fits.
+ *
+ * @param {object[]} scoredAttractions
+ * @param {number} budget - User budget in INR
+ * @param {number} [tolerance=0.10] - Default 0.10 (+10%)
  * @param {object} [options]
- * @param {'all_inclusive'|'tickets_only'} [options.budgetMode='all_inclusive']
- * @param {number} [options.transportReserveINR=200]
- * @returns {object} Optimization output
+ * @returns {object} Structured optimization output
  */
 export function optimizeRecommendations(
   scoredAttractions = [],
-  budget = 2000,
+  budget = 1000,
   tolerance = 0.10,
   options = {}
 ) {
   const safeBudget = Math.max(0, Number(budget) || 0);
   const safeTolerance = Math.min(Math.max(Number(tolerance) || 0.10, 0), 0.50);
+  const softBudget = Math.floor(safeBudget * (1 + safeTolerance));
   const budgetMode = options.budgetMode || 'all_inclusive';
+  const transportMode = options.transportMode || 'auto_rickshaw';
+  const cityCenter = options.cityCenter || { lat: 24.5854, lon: 73.7125 };
 
-  // Calculate allocation for attraction tickets
-  let attractionBudget = safeBudget;
-  let allocatedTransportBuffer = 0;
+  const optParams = { budgetMode, transportMode, cityCenter };
 
-  if (budgetMode === 'all_inclusive') {
-    // Dynamic transport reserve: ~20% of budget, bounded between ₹150 and ₹450
-    allocatedTransportBuffer = Math.min(
-      Math.max(Math.round(safeBudget * 0.20), 150),
-      450
-    );
-    // Don't reduce attraction budget below ₹100 if user budget allows
-    if (safeBudget > allocatedTransportBuffer + 100) {
-      attractionBudget = safeBudget - allocatedTransportBuffer;
-    } else {
-      allocatedTransportBuffer = Math.round(safeBudget * 0.15);
-      attractionBudget = safeBudget - allocatedTransportBuffer;
-    }
+  // 1. Primary Recommendation Pass (Strictly <= userBudget)
+  const primaryResult = optimizeItineraryForBudget(scoredAttractions, safeBudget, optParams);
+
+  // 2. Soft Budget Pass (Strictly <= softBudget)
+  const softResult = optimizeItineraryForBudget(scoredAttractions, softBudget, optParams);
+
+  // 3. Alternative Determination
+  // Only accept alternative if:
+  // - Primary couldn't find a valid combination within userBudget, BUT softBudget fits, OR
+  // - Soft budget unlocks a distinct higher-value itinerary where totalTripCost > safeBudget AND <= softBudget
+  let alternativeItinerary = [];
+  let alternativeMetrics = null;
+  let isAlternativeApplicable = false;
+
+  if (!primaryResult.isFeasible && softResult.isFeasible) {
+    alternativeItinerary = softResult.attractions;
+    alternativeMetrics = softResult.metrics;
+    isAlternativeApplicable = true;
+  } else if (
+    primaryResult.isFeasible &&
+    softResult.isFeasible &&
+    softResult.metrics.totalScore > primaryResult.metrics.totalScore &&
+    softResult.metrics.totalTripCost > safeBudget &&
+    softResult.metrics.totalTripCost <= softBudget
+  ) {
+    alternativeItinerary = softResult.attractions;
+    alternativeMetrics = softResult.metrics;
+    isAlternativeApplicable = true;
   }
 
-  // 1. Primary pass (Within attraction budget)
-  const primaryAttractions = solve01Knapsack(scoredAttractions, attractionBudget);
-  const primaryTotalCost = primaryAttractions.reduce(
-    (sum, item) => sum + (item.price?.amount || 0),
-    0
-  );
+  // 4. Overall Feasibility Check
+  const isFeasible = primaryResult.isFeasible || isAlternativeApplicable;
+  const feasibilityMessage = !isFeasible
+    ? 'No suitable combination of attractions is available within your budget, even with the additional 10% allowance. Please increase your budget or change your selected priorities.'
+    : null;
 
-  // 2. Soft-budget pass (Budget + Tolerance)
-  const softAttractionBudget = Math.floor(
-    (safeBudget * (1 + safeTolerance)) - (budgetMode === 'all_inclusive' ? allocatedTransportBuffer : 0)
+  // Logging required by Issue 4
+  console.log(
+    `[BudgetOptimizer] Budget: ₹${safeBudget} | Soft Budget (Max +${Math.round(safeTolerance * 100)}%): ₹${softBudget} | Mode: ${budgetMode}`
   );
-  const softAttractions = solve01Knapsack(scoredAttractions, softAttractionBudget);
-
-  // Isolate distinct alternatives (items in soft set that are NOT in primary set)
-  const primaryIds = new Set(primaryAttractions.map((item) => item.id || item.name));
-  const alternativeAttractions = softAttractions.filter(
-    (item) => !primaryIds.has(item.id || item.name)
-  );
-  const alternativeTotalCost = alternativeAttractions.reduce(
-    (sum, item) => sum + (item.price?.amount || 0),
-    0
-  );
-
-  // 3. Final expenditure revalidation
-  const isStrictlyWithinBudget = primaryTotalCost <= attractionBudget;
-  const isWithinUserTotalBudget = primaryTotalCost <= safeBudget;
+  if (primaryResult.isFeasible) {
+    console.log(
+      `[BudgetOptimizer] ✅ Primary Itinerary Accepted: ${primaryResult.attractions.length} places | Attraction Subtotal: ₹${primaryResult.metrics.attractionTicketsCost} | Transport: ₹${primaryResult.metrics.transportationCost} | Final Expenditure: ₹${primaryResult.metrics.totalTripCost} <= ₹${safeBudget}`
+    );
+  } else {
+    console.log(`[BudgetOptimizer] ⚠️ No combination feasible within strict budget of ₹${safeBudget}`);
+  }
+  if (isAlternativeApplicable) {
+    console.log(
+      `[BudgetOptimizer] 💡 Alternative Itinerary Accepted: ${alternativeItinerary.length} places | Attraction Subtotal: ₹${alternativeMetrics.attractionTicketsCost} | Transport: ₹${alternativeMetrics.transportationCost} | Final Expenditure: ₹${alternativeMetrics.totalTripCost} <= ₹${softBudget}`
+    );
+  }
+  if (!isFeasible) {
+    console.warn(`[BudgetOptimizer] ❌ ${feasibilityMessage}`);
+  }
 
   return {
     withinBudget: {
-      attractions: primaryAttractions,
-      totalAttractionCost: primaryTotalCost,
-      isWithinBudget: isStrictlyWithinBudget,
+      attractions: primaryResult.attractions,
+      totalAttractionCost: primaryResult.metrics.attractionTicketsCost,
+      transportCost: primaryResult.metrics.transportationCost,
+      totalTripCost: primaryResult.metrics.totalTripCost,
+      totalDistanceKm: primaryResult.metrics.totalDistanceKm,
+      isWithinBudget: primaryResult.isFeasible,
+      metrics: primaryResult.metrics,
     },
     overBudgetAlternatives: {
-      attractions: alternativeAttractions,
-      totalAttractionCost: alternativeTotalCost,
-      softBudgetLimit: softAttractionBudget,
+      attractions: alternativeItinerary,
+      totalAttractionCost: alternativeMetrics?.attractionTicketsCost || 0,
+      transportCost: alternativeMetrics?.transportationCost || 0,
+      totalTripCost: alternativeMetrics?.totalTripCost || 0,
+      totalDistanceKm: alternativeMetrics?.totalDistanceKm || 0,
+      softBudgetLimit: softBudget,
       tolerancePercentage: `${Math.round(safeTolerance * 100)}%`,
+      isAlternativeApplicable,
+      metrics: alternativeMetrics,
+    },
+    feasibility: {
+      isFeasible,
+      message: feasibilityMessage,
     },
     budgetConfiguration: {
       userTotalBudget: safeBudget,
+      softBudgetLimit: softBudget,
       budgetMode,
-      allocatedTransportBuffer,
-      effectiveAttractionBudget: attractionBudget,
+      transportMode,
       toleranceApplied: safeTolerance,
-      isStrictlyWithinBudget,
-      isWithinUserTotalBudget,
+      primaryTotalTripCost: primaryResult.metrics.totalTripCost,
+      alternativeTotalTripCost: alternativeMetrics?.totalTripCost || 0,
     },
   };
 }

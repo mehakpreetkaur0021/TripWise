@@ -3,14 +3,36 @@ import { ENV } from '../config/env.js';
 
 const OTM_BASE_URL = 'https://api.opentripmap.com/0.1/en/places';
 
-// Category to OpenTripMap "kinds" mapping
+// Valid OpenTripMap categories that return HTTP 200 without malformed syntax errors
 export const CATEGORY_KINDS_MAP = {
-  Monuments: 'historic_architecture,monuments,castles',
-  Nature: 'natural,parks,gardens',
+  Monuments: 'historic,monuments,castles',
+  Nature: 'natural,gardens_and_parks',
   Adventure: 'sport,amusements',
-  Lakes_Boating: 'bodies_of_water',
-  Culture: 'cultural,museums,theatres_and_entertainments',
-  Religious_Places: 'religion,hindu_temples,mosques,churches',
+  Lakes_Boating: 'water,natural',
+  Culture: 'cultural,museums',
+  Religious_Places: 'religion',
+};
+
+// Authoritative coordinates for supported destinations
+export const KNOWN_CITIES = {
+  udaipur: {
+    cityName: 'Udaipur',
+    state: 'Rajasthan',
+    country: 'IN',
+    coordinates: { lat: 24.5854, lon: 73.7125 },
+  },
+  jaipur: {
+    cityName: 'Jaipur',
+    state: 'Rajasthan',
+    country: 'IN',
+    coordinates: { lat: 26.9124, lon: 75.7873 },
+  },
+  jodhpur: {
+    cityName: 'Jodhpur',
+    state: 'Rajasthan',
+    country: 'IN',
+    coordinates: { lat: 26.2389, lon: 73.0243 },
+  },
 };
 
 // In-memory cache for API calls to preserve free-tier quota: key -> { data, timestamp }
@@ -334,10 +356,25 @@ export const VERIFIED_UDAIPUR_ATTRACTIONS = [
  * Resolve city geographic center.
  */
 export async function getCityCenter(cityName = 'Udaipur') {
-  const cacheKey = `geo:${cityName.toLowerCase()}`;
+  const cityKey = (cityName || 'udaipur').toLowerCase().trim();
+  const cacheKey = `geo:${cityKey}`;
   const cached = getCached(cacheKey);
   if (cached) return cached;
 
+  // Authoritative coordinates for known destinations (avoids geoname disambiguation errors)
+  if (KNOWN_CITIES[cityKey]) {
+    const known = {
+      cityName: KNOWN_CITIES[cityKey].cityName,
+      coordinates: KNOWN_CITIES[cityKey].coordinates,
+      country: KNOWN_CITIES[cityKey].country || 'IN',
+      source: 'authoritative_destination_registry',
+      isLive: false,
+    };
+    setCache(cacheKey, known);
+    return known;
+  }
+
+  // Fallback to OpenTripMap geoname lookup for other cities
   if (ENV.OTM_API_KEY && ENV.OTM_API_KEY.trim()) {
     try {
       const response = await axios.get(`${OTM_BASE_URL}/geoname`, {
@@ -392,25 +429,30 @@ export async function discoverPlaces({
 }) {
   const geo = await getCityCenter(city);
   const offset = (page - 1) * limit;
+  let fallbackReason = null;
+  let fallbackStatus = 'unconfigured_fallback';
 
-  // 1. If OpenTripMap API key is configured, query live API
-  if (ENV.OTM_API_KEY && ENV.OTM_API_KEY.trim()) {
+  // 1. If category requested is unknown, fallback immediately
+  if (category && !CATEGORY_KINDS_MAP[category]) {
+    fallbackReason = `OpenTripMap has no recognized category mapping for "${category}".`;
+    fallbackStatus = 'empty_response_fallback';
+    console.warn(`[PlaceDiscovery] ${fallbackReason} Using curated registry.`);
+  } else if (ENV.OTM_API_KEY && ENV.OTM_API_KEY.trim()) {
     try {
-      const kinds = category ? CATEGORY_KINDS_MAP[category] || '' : '';
+      const kinds = category ? CATEGORY_KINDS_MAP[category] : '';
       const cacheKey = `radius:${geo.coordinates.lat}:${geo.coordinates.lon}:${kinds}:${limit}:${offset}`;
-      const cached = getCached(cacheKey);
+      let rawItems = getCached(cacheKey);
 
-      let rawItems = cached;
       if (!rawItems) {
+        console.log(`[PlaceDiscovery] Querying OpenTripMap radius for "${category}" around (${geo.coordinates.lat}, ${geo.coordinates.lon})...`);
         const response = await axios.get(`${OTM_BASE_URL}/radius`, {
           params: {
             lat: geo.coordinates.lat,
             lon: geo.coordinates.lon,
             radius,
             kinds: kinds || undefined,
-            limit,
+            limit: Math.max(limit, 15),
             offset,
-            rate: 2,
             format: 'json',
             apikey: ENV.OTM_API_KEY.trim(),
           },
@@ -420,14 +462,26 @@ export async function discoverPlaces({
         setCache(cacheKey, rawItems);
       }
 
-      if (rawItems.length > 0) {
-        // Fetch detailed descriptions for top items
+      // Filter out unnamed landmarks or empty records
+      const namedItems = (rawItems || []).filter(
+        (item) => item.name && item.name.trim().length > 0
+      );
+
+      if (namedItems.length > 0) {
+        // Fetch detailed descriptions for top items while respecting free-tier rate limits (top 3)
+        const topItems = namedItems.slice(0, limit);
         const normalized = await Promise.all(
-          rawItems.map(async (raw) => {
-            const detail = await fetchPlaceDetail(raw.xid);
+          topItems.map(async (raw, idx) => {
+            // Only fetch extra xid detail for top 3 items to prevent HTTP 429 rate limiting
+            let detail = null;
+            if (idx < 3) {
+              detail = await fetchPlaceDetail(raw.xid);
+            }
             return normalizeOTMPlace(detail || raw, category);
           })
         );
+
+        console.log(`[PlaceDiscovery] Successfully retrieved ${normalized.length} live OpenTripMap places for ${category}.`);
 
         return {
           places: normalized,
@@ -437,13 +491,32 @@ export async function discoverPlaces({
             isLive: true,
             status: 'active_live_api',
             dataSource: 'opentripmap_live',
-            message: 'Live POI discovery powered by OpenTripMap API.',
+            recordsRetrieved: normalized.length,
+            message: `Live POI discovery powered by OpenTripMap API (${normalized.length} places retrieved).`,
           },
         };
+      } else {
+        fallbackReason = `OpenTripMap returned 0 named attractions for category "${category}".`;
+        fallbackStatus = 'empty_response_fallback';
+        console.warn(`[PlaceDiscovery] ${fallbackReason} Falling back to curated registry.`);
       }
     } catch (err) {
-      console.warn(`[PlaceDiscovery] Live OTM radius search failed: ${err.message}.`);
+      const httpStatus = err.response?.status;
+      if (httpStatus === 401 || httpStatus === 403) {
+        fallbackReason = `OpenTripMap authentication failed (HTTP ${httpStatus}): Invalid or unauthorized API key.`;
+        fallbackStatus = 'api_error_fallback';
+      } else if (err.code === 'ENOTFOUND' || err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
+        fallbackReason = `OpenTripMap network connection failed: ${err.message}.`;
+        fallbackStatus = 'network_error_fallback';
+      } else {
+        fallbackReason = `OpenTripMap request failed: ${err.response?.data?.error || err.message}.`;
+        fallbackStatus = 'api_error_fallback';
+      }
+      console.warn(`[PlaceDiscovery] Live OTM radius search failed: ${fallbackReason} Using curated registry.`);
     }
+  } else {
+    fallbackReason = 'OTM_API_KEY is not configured in server/.env.';
+    fallbackStatus = 'unconfigured_fallback';
   }
 
   // 2. Verified official registry fallback when key is unconfigured or call fails
@@ -466,10 +539,11 @@ export async function discoverPlaces({
     providerStatus: {
       provider: 'OpenTripMap',
       isLive: false,
-      status: 'unconfigured_fallback',
+      status: fallbackStatus,
       dataSource: 'verified_official_registry',
-      message:
-        'OTM_API_KEY not configured in server/.env. Sourced from verified historical and tourism records for Udaipur.',
+      fallbackReason,
+      recordsRetrieved: paginated.length,
+      message: fallbackReason,
     },
   };
 }

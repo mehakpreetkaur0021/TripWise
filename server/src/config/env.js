@@ -1,8 +1,13 @@
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 export const ENV = {
-  PORT: parseInt(process.env.PORT || '5001', 10),
+  PORT: parseInt(process.env.PORT || '5005', 10),
   OTM_API_KEY: process.env.OTM_API_KEY || '',
   GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY || '',
   TICKETLENS_API_KEY: process.env.TICKETLENS_API_KEY || '',
